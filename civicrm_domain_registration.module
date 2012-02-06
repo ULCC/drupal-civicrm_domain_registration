@@ -5,6 +5,15 @@
  * @copyright 2012 ULCC {@link http://ulcc.ac.uk}
  */
 
+/**
+ * Constants to keep track of the admin options
+ */
+define('CIVICRM_DOMAIN_REGISTRATION_MODE_NONE', 0);
+define('CIVICRM_DOMAIN_REGISTRATION_MODE_LIST', 1);
+define('CIVICRM_DOMAIN_REGISTRATION_MODE_CIVICRM', 2);
+define('CIVICRM_DOMAIN_REGISTRATION_MODE_BOTH', 3);
+
+
 
 /**
  * Make an admin interface for domains to be added as a list
@@ -14,6 +23,22 @@
 function civicrm_domain_registration_admin() {
   $form = array();
 
+    // What combination of using a list and/or using CiviCRM contacts do we want?
+    $form['civicrm_domain_registration_filtering_mode'] = array(
+        '#type' => 'radios',
+        '#title' => t('Filtering mode'),
+        '#default_value' => variable_get('civicrm_domain_registration_filtering_mode', 0),
+        '#options' => array(
+            t('None - all emails are allowed'),
+            t('List only - just emails from the domains listed below'),
+            t('CiviCRM only - just emails which are already associated with a user in CiviCRM'),
+            t('List or CiviCRM - either one will suffice'),
+        ),
+        '#required' => TRUE,
+      );
+
+    // What email domains to allow
+    // TODO validate on the way in
   $form['civicrm_domain_registration_allowed_domains'] = array(
     '#type' => 'textarea',
     '#title' => t('Allowed email domains'),
@@ -73,9 +98,19 @@ function civicrm_domain_registration_form_user_register_form_alter(&$form, &$for
             unset ($alloweddomains[$key]);
         }
     }
-    $message =
-        t('Only emails from the following domains will be permitted (unless we already have your email on record):');
-    $form['account']['mail']['#description'] .= '<br /><br /> '.$message.' '.implode(', ', $alloweddomains);
+
+    $message = '';
+    $filtermode = variable_get('civicrm_domain_registration_filtering_mode', 0);
+    if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_LIST) {
+        $message = t('Only emails from the following domains are permitted:').' ';
+        $message .= '<br /><br /> '.$message.' '.implode(', ', $alloweddomains);
+    } else if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_CIVICRM) {
+        $message = t('Only emails from the our pre-approved list are permitted.');
+    } else if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_BOTH) {
+        $message = t('Only emails from the following domains are permitted (unless your email address is on our pre-approved list):').' ';
+        $message .= '<br /><br /> '.$message.' '.implode(', ', $alloweddomains);
+    }
+    $form['account']['mail']['#description'] .= $message;
 
 
 }
@@ -90,41 +125,64 @@ function civicrm_domain_registration_form_user_register_form_alter(&$form, &$for
  */
 function civicrm_user_register_validate($form, &$form_state) {
 
+    $filtermode = $form_state['input']['civicrm_domain_registration_filtering_mode'];
+
+    // If filter mode says 'none', do nothing
+    if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_NONE) {
+        return TRUE;
+    }
+
     $useremail = $form_state['input']['mail'];
     if (!valid_email_address($useremail)) {
         form_set_error('mail', t('Email haddress is not in the correct formatted'));
         return false;
     }
     $useremailarray = explode('@', $useremail);
-    $useremaildomain = $useremailarray[1]; // validate! Text and dots only.
+    $useremaildomain = $useremailarray[1];
+    $allowed_domains = array();
 
-    $allowed_domains = variable_get('civicrm_domain_registration_allowed_domains', '');
-    $allowed_domains = explode(',', $allowed_domains);
-    // User email needs to match one of these domains
-    foreach ($allowed_domains as &$domain) {
-        $domain = trim($domain);
-        $domainisvalid = valid_url($domain);
-        if ($domainisvalid && $useremaildomain == $domain) {
-            return true;
+    if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_LIST ||
+        $filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_BOTH) {
+
+        $allowed_domains = variable_get('civicrm_domain_registration_allowed_domains', '');
+        $allowed_domains = explode(',', $allowed_domains);
+        // User email needs to match one of these domains
+        foreach ($allowed_domains as &$domain) {
+            $domain = trim($domain);
+            $domainisvalid = valid_url($domain);
+            if ($domainisvalid && $useremaildomain == $domain) {
+                return true;
+            }
         }
     }
 
-    // If no match in allowed domains, check CiviCRM in case this one specific email address is
-    // already known
-    if (function_exists('civicrm_initialize') && civicrm_initialize()) {
-        $params = array('email' => $useremail, 'version' => 3);
-        $contact = civicrm_api('Email', 'getsingle', $params);
-        if (!empty($contact['contact_id'])) {
-            // We can trust the rest of the Drupal registration process to avoid allowing
-            // duplicate emails
-            return true;
-        } else {
-            // No match - not allowed to register
-            $errormessage = t('Email is not from an approved domain. The following domains are approved:').' ';
-            $errormessage .= implode(', ', $allowed_domains);
-            form_set_error('mail', $errormessage);
+    if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_CIVICRM ||
+        $filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_BOTH) {
+
+        // If no match in allowed domains, check CiviCRM in case this one specific email address is
+        // already known
+        if (function_exists('civicrm_initialize') && civicrm_initialize()) {
+            $params = array('email' => $useremail, 'version' => 3);
+            $contact = civicrm_api('Email', 'getsingle', $params);
+            if (!empty($contact['contact_id'])) {
+                // We can trust the rest of the Drupal registration process to avoid allowing
+                // duplicate emails
+                return true;
+            } else {
+                // No match - not allowed to register.
+                if ($filtermode == CIVICRM_DOMAIN_REGISTRATION_MODE_CIVICRM) {
+                    $errormessage = t('Your email address is not on the pre-approved list. Please contact an admin for assistance.');
+                } else { // Must be 'both' mode
+                    $errormessage = t('Email is not on the pre-approved list or from an approved domain. The following domains are approved:').' ';
+                    $errormessage .= implode(', ', $allowed_domains);
+                }
+                form_set_error('mail', $errormessage);
+                return false;
+            }
         }
     }
+
+    return false;
 
 }
 

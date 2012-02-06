@@ -1,0 +1,2 @@
+This module will allow an admin to filter the users who try to register by specifying that only certain email domains
+are allowed to be used. Alternatively, people who are already known via CiviCRM are always OK.
