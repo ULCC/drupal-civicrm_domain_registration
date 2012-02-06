@@ -1,0 +1,130 @@
+<?php
+/**
+ * CiviCRM Domain Registration module
+ *
+ * @copyright 2012 ULCC {@link http://ulcc.ac.uk}
+ */
+
+
+/**
+ * Make an admin interface for domains to be added as a list
+ *
+ * @return array
+ */
+function civicrm_domain_registration_admin() {
+  $form = array();
+
+  $form['civicrm_domain_registration_allowed_domains'] = array(
+    '#type' => 'textarea',
+    '#title' => t('Allowed email domains'),
+    '#default_value' => variable_get('civicrm_domain_registration_allowed_domains', ''),
+    '#rows' => 7,
+    '#cols' => 100,
+    '#description' => t("Comma separated list e.g. google.com, nhs.org.uk . Users can only register on the site if they use an email address from one of these domains, or if their email is already in CiviCRM as a contact."),
+    '#required' => FALSE,
+  );
+
+  return system_settings_form($form);
+
+}
+
+/**
+ * Implementation of hook_menu which adds the link to the configuration screen to the Drupal
+ * configuration menus
+ *
+ * @return array
+ */
+function civicrm_domain_registration_menu() {
+
+  $items = array();
+
+  $items['admin/config/system/civicrm_domain_registration'] = array(
+    'title' => t('CiviCRM Domain Registration module settings'),
+    'description' => t('Allows the list of allowed domains to be configured'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('civicrm_domain_registration_admin'),
+    'access arguments' => array('access administration pages'),
+    'type' => MENU_NORMAL_ITEM,
+   );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_BASE_FORM_ID_alter(). This adds the custom validation to the form so that
+ * the email address will be checked.
+ *
+ * @param $form
+ * @param $form_state
+ * @param $form_id
+ */
+function civicrm_domain_registration_form_user_register_form_alter(&$form, &$form_state, $form_id) {
+    $form['#validate'][] = 'civicrm_user_register_validate';
+    $alloweddomains = variable_get('civicrm_domain_registration_allowed_domains', '');
+    if (!$alloweddomains) {
+        return;
+    }
+    $alloweddomains = explode(',', $alloweddomains);
+    // Make sure we don't have any crap. Unlikely as the admin is probably the only one who can add these
+    foreach ($alloweddomains as $key => &$domain) {
+        $domain = trim($domain);
+        if (!valid_url($domain)) {
+            // TODO ought to get rid of duff ones on the way into the DB.
+            unset ($alloweddomains[$key]);
+        }
+    }
+    $message =
+        t('Only emails from the following domains will be permitted (unless we already have your email on record):');
+    $form['account']['mail']['#description'] .= '<br /><br /> '.$message.' '.implode(', ', $alloweddomains);
+
+
+}
+
+/**
+ * This does the actual validation by checking to see if the user's email is one of the allowed
+ * domains
+ *
+ * @param array $form
+ * @param array $form_state
+ * @return bool
+ */
+function civicrm_user_register_validate($form, &$form_state) {
+
+    $useremail = $form_state['input']['mail'];
+    if (!valid_email_address($useremail)) {
+        form_set_error('mail', t('Email haddress is not in the correct formatted'));
+        return false;
+    }
+    $useremailarray = explode('@', $useremail);
+    $useremaildomain = $useremailarray[1]; // validate! Text and dots only.
+
+    $allowed_domains = variable_get('civicrm_domain_registration_allowed_domains', '');
+    $allowed_domains = explode(',', $allowed_domains);
+    // User email needs to match one of these domains
+    foreach ($allowed_domains as &$domain) {
+        $domain = trim($domain);
+        $domainisvalid = valid_url($domain);
+        if ($domainisvalid && $useremaildomain == $domain) {
+            return true;
+        }
+    }
+
+    // If no match in allowed domains, check CiviCRM in case this one specific email address is
+    // already known
+    if (function_exists('civicrm_initialize') && civicrm_initialize()) {
+        $params = array('email' => $useremail, 'version' => 3);
+        $contact = civicrm_api('Email', 'getsingle', $params);
+        if (!empty($contact['contact_id'])) {
+            // We can trust the rest of the Drupal registration process to avoid allowing
+            // duplicate emails
+            return true;
+        } else {
+            // No match - not allowed to register
+            $errormessage = t('Email is not from an approved domain. The following domains are approved:').' ';
+            $errormessage .= implode(', ', $allowed_domains);
+            form_set_error('mail', $errormessage);
+        }
+    }
+
+}
+
